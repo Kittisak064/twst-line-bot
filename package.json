@@ -9,7 +9,7 @@
   "dependencies": {
     "@line/bot-sdk": "^7.5.2",
     "express": "^4.19.2",
-    "google-spreadsheet": "^4.1.1",
+    "google-spreadsheet": "^3.3.0",
     "openai": "^4.52.0"
   }
 }
