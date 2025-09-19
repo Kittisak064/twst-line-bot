@@ -16,7 +16,7 @@ const openai = new OpenAI({
 
 // โหลด Service Account จาก Secret File
 const creds = JSON.parse(
-  fs.readFileSync("./config/google-service-account.json", "utf8")
+  fs.readFileSync("google-service-account.json", "utf8")
 );
 
 // Google Sheet
