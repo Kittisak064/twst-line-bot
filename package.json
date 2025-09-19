@@ -1,0 +1,20 @@
+{
+  "name": "line-gpt-sheets-bot",
+  "version": "1.0.0",
+  "description": "LINE bot with GPT + Google Sheets (Dynamic Loader)",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": { "node": "18.x" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^7.5.2",
+    "axios": "^1.7.7",
+    "body-parser": "^1.20.2",
+    "dayjs": "^1.11.13",
+    "express": "^4.19.2",
+    "google-spreadsheet": "^4.0.2",
+    "openai": "^4.60.1"
+  }
+}
