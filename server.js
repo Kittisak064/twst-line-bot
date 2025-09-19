@@ -1,23 +1,9 @@
-import express from "express";
-import { middleware } from "@line/bot-sdk";
-
-const config = {
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET,
-};
-
-const app = express();
-
-// LINE Webhook
-app.post("/webhook", middleware(config), (req, res) => {
-  res.status(200).send("OK ✅"); // ตอบกลับเสมอ 200
-});
-
-// หน้า default เช็กว่า server online
-app.get("/", (req, res) => {
-  res.send("Server is running 🚀");
-});
-
-app.listen(process.env.PORT || 10000, () => {
-  console.log("Server started");
-});
+async function testSheet() {
+  await doc.useServiceAccountAuth({
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: Buffer.from(process.env.GOOGLE_PRIVATE_KEY_BASE64, "base64").toString("utf-8"),
+  });
+  await doc.loadInfo();
+  console.log("✅ Google Sheet title:", doc.title);
+}
+testSheet();
