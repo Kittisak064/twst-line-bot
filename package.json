@@ -7,9 +7,11 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "body-parser": "^1.20.2",
+    "@line/bot-sdk": "^7.5.2",
     "express": "^4.19.2",
-    "google-spreadsheet": "^4.0.4",
-    "node-fetch": "^3.3.2"
+    "google-spreadsheet": "^4.1.1",
+    "google-auth-library": "^9.14.2",
+    "openai": "^4.52.0"
   }
 }
+
