@@ -1,124 +1,118 @@
 import express from "express";
-import bodyParser from "body-parser";
-import fetch from "node-fetch";
+import { Client, middleware } from "@line/bot-sdk";
 import { GoogleSpreadsheet } from "google-spreadsheet";
+import { JWT } from "google-auth-library";
+import OpenAI from "openai";
 
-const app = express();
-app.use(bodyParser.json());
+// ================== LINE CONFIG ==================
+const config = {
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.LINE_CHANNEL_SECRET,
+};
+const client = new Client(config);
 
-// ====== CONFIG ======
-const {
-  LINE_CHANNEL_ACCESS_TOKEN,
-  LINE_CHANNEL_SECRET,
-  OPENAI_API_KEY,
-  GOOGLE_SHEET_ID,
-  GOOGLE_CLIENT_EMAIL,
-  GOOGLE_PRIVATE_KEY_BASE64,
-} = process.env;
+// ================== OPENAI CONFIG ==================
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-// ====== GOOGLE SHEET SETUP ======
-const doc = new GoogleSpreadsheet(GOOGLE_SHEET_ID);
+// ================== GOOGLE SHEETS CONFIG ==================
+const serviceAccountAuth = new JWT({
+  email: process.env.GOOGLE_CLIENT_EMAIL,
+  key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+});
 
-async function authSheet() {
-  await doc.useServiceAccountAuth({
-    client_email: GOOGLE_CLIENT_EMAIL,
-    private_key: Buffer.from(GOOGLE_PRIVATE_KEY_BASE64, "base64").toString("utf-8"),
-  });
+const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
+
+async function loadSheetData() {
   await doc.loadInfo();
+  const sheet = doc.sheetsByIndex[0]; // ใช้ชีทแรก
+  const rows = await sheet.getRows();
+
+  let products = {};
+  rows.forEach((row) => {
+    const code = row["รหัสสินค้า"];
+    if (!code) return;
+
+    products[code] = {
+      name: row["ชื่อสินค้า (ทางการ)"] || "",
+      price: row["ราคา"] || "",
+      keywords: (row["คำที่มักถูกเรียก (Alias Keywords)"] || "")
+        .split(",")
+        .map((k) => k.trim()),
+    };
+  });
+
+  return { sheet, products };
 }
 
-// ====== TEST SHEET ======
-(async () => {
-  try {
-    await authSheet();
-    console.log("✅ Google Sheet Connected:", doc.title);
-  } catch (err) {
-    console.error("❌ Google Sheet Error:", err.message);
-  }
-})();
+// ================== LINE BOT APP ==================
+const app = express();
 
-// ====== LINE Webhook ======
-app.post("/webhook", async (req, res) => {
+app.post("/webhook", middleware(config), async (req, res) => {
   try {
-    const events = req.body.events;
-    await Promise.all(events.map(handleEvent));
-    res.sendStatus(200);
+    const results = await Promise.all(req.body.events.map(handleEvent));
+    res.json(results);
   } catch (err) {
     console.error("❌ Webhook Error:", err);
-    res.sendStatus(500);
+    res.status(200).end(); // ตอบกลับ 200 เพื่อไม่ให้ LINE ตัด Webhook
   }
 });
 
-// ====== Handle Event ======
 async function handleEvent(event) {
-  if (event.type !== "message" || event.message.type !== "text") return;
-
-  const userMessage = event.message.text;
-
-  // ตอบด้วย GPT
-  const reply = await askGPT(userMessage);
-
-  // ส่งกลับ LINE
-  await replyToLine(event.replyToken, reply);
-
-  // บันทึกลงชีท
-  try {
-    await authSheet();
-    const sheet = doc.sheetsByIndex[0];
-    await sheet.addRow({
-      Timestamp: new Date().toLocaleString("th-TH"),
-      UserMessage: userMessage,
-      BotReply: reply,
-    });
-  } catch (err) {
-    console.error("❌ Save to Sheet Error:", err.message);
+  if (event.type !== "message" || event.message.type !== "text") {
+    return null;
   }
-}
 
-// ====== GPT ======
-async function askGPT(userMessage) {
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "คุณคือแอดมินเพจ ตอบลูกค้าให้สุภาพ ธรรมชาติ มีอีโมจิเล็กน้อย" },
-          { role: "user", content: userMessage },
-        ],
-        temperature: 0.6,
-        max_tokens: 200,
-      }),
-    });
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || "ขออภัยค่ะ ตอนนี้ระบบไม่ตอบสนอง 🙏";
-  } catch (err) {
-    console.error("❌ OpenAI Error:", err.message);
-    return "ขออภัยค่ะ ระบบมีปัญหาชั่วคราว 🙏";
+  const userMessage = event.message.text.trim();
+  const { products } = await loadSheetData();
+
+  let replyText;
+
+  // ================== เช็คว่ามีสินค้า ==================
+  let matchedProduct = null;
+  for (const code in products) {
+    if (
+      userMessage.includes(code) ||
+      products[code].keywords.some((k) => userMessage.includes(k))
+    ) {
+      matchedProduct = products[code];
+      break;
+    }
   }
-}
 
-// ====== Reply LINE ======
-async function replyToLine(replyToken, text) {
-  await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
-    },
-    body: JSON.stringify({
-      replyToken,
-      messages: [{ type: "text", text }],
-    }),
+  if (matchedProduct) {
+    replyText = `📌 ${matchedProduct.name}\n💰 ราคา: ${matchedProduct.price} บาท\nสนใจสั่งซื้อ แจ้งจำนวนได้เลยครับ`;
+  } else {
+    // ส่งไปให้ GPT ตอบ
+    const systemPrompt = `
+คุณคือแอดมินเพจ พูดจากับลูกค้าเหมือนคนจริง
+ใช้ข้อมูลจาก Google Sheet (สินค้า, ราคา, โปรโมชัน, FAQ)
+ถ้าลูกค้าถามนอกเหนือ ให้ตอบว่า "ขอให้แอดมินช่วยตอบครับ"  
+อย่าตอบแข็งเกินไป ให้ใส่อิโมจิเล็กน้อยเป็นกันเอง`;
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      temperature: 0.5,
+      max_tokens: 300,
+    });
+
+    replyText = completion.choices[0].message.content.trim();
+  }
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: replyText,
   });
 }
 
-// ====== START SERVER ======
-const PORT = process.env.PORT || 3000;
+// ================== START SERVER ==================
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
