@@ -1,16 +1,17 @@
 {
   "name": "line-bot",
   "version": "1.0.0",
-  "type": "module",
   "main": "server.js",
+  "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "render-build": "echo 'No build step'"
+    "start": "node server.js"
   },
   "dependencies": {
-    "axios": "^1.7.4",
-    "body-parser": "^1.20.3",
+    "@line/bot-sdk": "^7.5.2",
     "express": "^4.19.2",
-    "google-spreadsheet": "3.3.0"
+    "google-spreadsheet": "^3.3.0",
+    "openai": "^4.52.0",
+    "dayjs": "^1.11.11",
+    "p-limit": "^5.0.0"
   }
 }
