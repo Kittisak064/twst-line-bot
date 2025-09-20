@@ -86,7 +86,14 @@ async function appendRow(name, record) {
   const sheet = doc.sheetsByTitle[name];
   if (!sheet) throw new Error(`Sheet not found: ${name}`);
   await sheet.loadHeaderRow();
-  await sheet.addRow(record);
+  
+  const headers = sheet.headerValues || [];
+  const cleanRecord = {};
+  for (const h of headers) {
+    if (record[h] !== undefined) cleanRecord[h] = record[h];
+  }
+
+  await sheet.addRow(cleanRecord);
 }
 
 function THB(n) {
