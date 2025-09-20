@@ -1,50 +1,14 @@
 // ==========================================================
 //  LINE x Google Sheets x OpenAI - Thai Pro Commerce Bot
-//  Author: (your team)
-//  Version: 1.0 (full features)
-//
-//  ✅ Features
-//   - อ่าน/เขียน Google Sheets ตามหัวตาราง "ภาษาไทย" ที่คุณใช้อยู่
-//     * Products:  รหัสสินค้า | ชื่อสินค้า | หมวดหมู่ | ราคา | คำที่ลูกค้าเรียก | ตัวเลือก | (หมายเหตุ ไม่บังคับ)
-//     * Promotions: รหัสโปรโมชั่น | รายละเอียดโปรโมชั่น | ประเภทคำนวณ | เงื่อนไข | ใช้กับสินค้า | ใช้กับหมวดหมู่
-//     * FAQ: คำถาม | คำตอบ | คำหลัก
-//     * personality: ชื่อพนักงาน | ชื่อเพจ | บุคลิก | คำเรียกลูกค้า | คำเรียกตัวเองแอดมิน | คำตอบเมื่อไม่รู้ | เพศ
-//     * Orders: เลขที่ออเดอร์ | รหัสสินค้า | ชื่อสินค้า | ตัวเลือก | จำนวน | ราคารวม | โปรโมชั่นที่ใช้ | ชื่อ-ที่อยู่ | เบอร์โทร | สถานะ
-//     * Payment: category | method | detail | qrcode(ไม่บังคับ)
-//     * Sessions: (auto prepare header ถ้ายังว่าง) timestamp | userId | stage | cart | note
-//     * Logs:     (auto prepare header ถ้ายังว่าง) timestamp | userId | type | text
-//
-//   - ตะกร้าหลายสินค้า (multi-item cart)
-//   - เลือก "รสชาติ" เมื่อหมวดหมู่ = food / เลือก "รุ่น" เมื่อหมวดอื่น เช่น machine
-//   - Interrupt ได้ (ทักถามอย่างอื่นกลางคัน แล้วกลับไปต่อ flow สั่งซื้อเดิม)
-//   - โปรโมชัน: PERCENT, FIXED_DISCOUNT, BUY_X_GET_Y, FREE_SHIPPING
-//   - ชำระเงิน: โอน/พร้อมเพย์/COD และส่ง QR อัตโนมัติถ้ามีคอลัมน์ qrcode
-//   - แจ้งเตือนแอดมินด้วย Group ID (ถ้าตั้งค่า)
-//   - รีเฟรช cache ทุก 10 นาที
-//
-//  ⚙️ ENV ต้องมี
-//   GOOGLE_CLIENT_EMAIL
-//   GOOGLE_PRIVATE_KEY   (มี \n ให้แทนด้วย newline อัตโนมัติ)
-//   GOOGLE_SHEET_ID
-//   LINE_CHANNEL_ACCESS_TOKEN
-//   LINE_CHANNEL_SECRET
-//   OPENAI_API_KEY
-//   ADMIN_GROUP_ID (ไม่บังคับ)
-//
-//  📦 package.json (แนะนำ)
-//   "dependencies": {
-//     "@line/bot-sdk": "^7.5.2",
-//     "express": "^4.19.2",
-//     "google-spreadsheet": "3.3.0",
-//     "google-auth-library": "^9.14.2",
-//     "openai": "^4.52.0",
-//     "dayjs": "^1.11.13",
-//     "p-limit": "^5.0.0"
-//   }
-//
-//  หมายเหตุ:
-//   - โค้ดนี้คุม Flow ให้จบการขายได้เสมอ และตอบเป็นธรรมชาติ (ใช้ OpenAI แต่ล็อกเงื่อนไขที่จำเป็น)
-//   - ไม่แก้หัวตารางของคุณ (เฉพาะ Sessions/Logs ถ้าไม่มี header จะสร้างให้อัตโนมัติ)
+//  Production-grade single-file server (ESM)
+//  - ใช้ google-spreadsheet v3.3.0 (useServiceAccountAuth)
+//  - รองรับสั่งซื้อหลายสินค้า + โปรโมชัน + COD + โอน/QR
+//  - บุคลิกพนักงานจากชีท personality
+//  - ตอบยืดหยุ่น: FAQ, สเปค, ราคา, โปร, วิธีจ่าย, ถามข้ามคุยต่อ, สรุปออเดอร์
+//  - ไม่โชว์ “รหัสสินค้า” ให้ลูกค้า
+//  - ป้องกันตอบยาว, ไม่ทัก “สวัสดี” ซ้ำพร่ำเพรื่อ
+//  - แจ้งเตือนแอดมินผ่าน Group ID (ถ้าตั้งค่า ADMIN_GROUP_ID)
+//  - บันทึก Sessions และ Logs ไปชีท
 // ==========================================================
 
 import express from 'express';
@@ -52,7 +16,6 @@ import { Client, middleware as lineMiddleware } from '@line/bot-sdk';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import OpenAI from 'openai';
 import dayjs from 'dayjs';
-import pLimit from 'p-limit';
 
 // ----------------------- ENV ------------------------------
 const {
@@ -62,20 +25,21 @@ const {
   LINE_CHANNEL_ACCESS_TOKEN,
   LINE_CHANNEL_SECRET,
   OPENAI_API_KEY,
-  ADMIN_GROUP_ID
+  ADMIN_GROUP_ID, // optional
+  PORT
 } = process.env;
 
 if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY || !GOOGLE_SHEET_ID) {
-  console.warn('⚠️ Google env is missing. Please set GOOGLE_CLIENT_EMAIL / GOOGLE_PRIVATE_KEY / GOOGLE_SHEET_ID');
+  console.error('❌ Google Sheet ENV not set');
 }
 if (!LINE_CHANNEL_ACCESS_TOKEN || !LINE_CHANNEL_SECRET) {
-  console.warn('⚠️ LINE env is missing. Please set LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET');
+  console.error('❌ LINE ENV not set');
 }
 if (!OPENAI_API_KEY) {
-  console.warn('⚠️ OPENAI_API_KEY is missing.');
+  console.error('❌ OpenAI ENV not set');
 }
 
-// ----------------------- CONSTANTS ------------------------
+// ----------------------- CONST ----------------------------
 const FIXED_SHEETS = {
   products: 'Products',
   promotions: 'Promotions',
@@ -99,8 +63,8 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // ----------------------- GOOGLE SHEETS --------------------
 const doc = new GoogleSpreadsheet(GOOGLE_SHEET_ID);
-
 async function authSheet() {
+  // สำคัญ: แทน \n ให้เป็น newline จริง
   const key = (GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
   await doc.useServiceAccountAuth({
     client_email: GOOGLE_CLIENT_EMAIL,
@@ -109,22 +73,13 @@ async function authSheet() {
   await doc.loadInfo();
 }
 
-async function ensureHeader(name, headers) {
-  const sheet = doc.sheetsByTitle[name];
-  if (!sheet) return;
-  await sheet.loadHeaderRow();
-  const have = (sheet.headerValues || []).filter(Boolean);
-  if (!have || have.length === 0) {
-    await sheet.setHeaderRow(headers);
-  }
-}
-
+// utility: อ่านชีทตาม header แถว 1 (ภาษาไทยได้)
 async function readSheet(name) {
   const sheet = doc.sheetsByTitle[name];
   if (!sheet) return [];
   await sheet.loadHeaderRow();
   const rows = await sheet.getRows();
-  const headers = sheet.headerValues;
+  const headers = sheet.headerValues || [];
   return rows.map(r => {
     const o = {};
     headers.forEach(h => (o[h] = (r[h] ?? '').toString().trim()));
@@ -132,14 +87,13 @@ async function readSheet(name) {
   });
 }
 
+// append record ตามคีย์ = header
 async function appendRow(name, record) {
   const sheet = doc.sheetsByTitle[name];
   if (!sheet) throw new Error(`Sheet not found: ${name}`);
   await sheet.loadHeaderRow();
   await sheet.addRow(record);
 }
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function THB(n) {
   const v = Number(n || 0);
@@ -155,68 +109,67 @@ const cache = {
   payment: []
 };
 
-//  utilities
+let PRODUCT_ALIAS_INDEX = new Map();
+
 function normalizeThaiCommaText(s = '') {
   return s.replace(/\s+/g, ' ').trim();
 }
 function splitList(s = '') {
-  return normalizeThaiCommaText(s).split(/,|，|\/|\|/).map(x => x.trim()).filter(Boolean);
+  return normalizeThaiCommaText(s)
+    .split(/,|，|\/|\||\n/).map(x => x.trim()).filter(Boolean);
 }
-
 function buildAliasIndex(products) {
   const idx = new Map();
   for (const p of products) {
     const aliases = splitList(p['คำที่ลูกค้าเรียก'] || p['คําที่ลูกค้าเรียก'] || '');
-    // รวมชื่อจริงและรหัสด้วย
-    aliases.push(p['รหัสสินค้า'], p['ชื่อสินค้า']);
+    aliases.push(p['ชื่อสินค้า']);
+    const sku = (p['รหัสสินค้า'] || '').toLowerCase();
     for (const a of aliases.map(x => x?.toLowerCase())) {
       if (!a) continue;
       const arr = idx.get(a) || [];
       arr.push(p);
       idx.set(a, arr);
     }
+    if (sku) {
+      const arr = idx.get(sku) || [];
+      arr.push(p);
+      idx.set(sku, arr);
+    }
   }
   return idx;
 }
 
-let PRODUCT_ALIAS_INDEX = new Map();
-
 async function loadAllData() {
   await authSheet();
-
-  // เตรียม header ให้ Sessions/Logs ถ้ายังไม่ตั้ง (ไม่ไปยุ่งชีทอื่น)
-  await ensureHeader(FIXED_SHEETS.sessions, ['timestamp', 'userId', 'stage', 'cart', 'note']);
-  await ensureHeader(FIXED_SHEETS.logs, ['timestamp', 'userId', 'type', 'text']);
-
-  const limit = pLimit(4);
   const [products, promotions, faq, personalityRows, payment] = await Promise.all([
-    limit(() => readSheet(FIXED_SHEETS.products)),
-    limit(() => readSheet(FIXED_SHEETS.promotions)),
-    limit(() => readSheet(FIXED_SHEETS.faq)),
-    limit(() => readSheet(FIXED_SHEETS.personality)),
-    limit(() => readSheet(FIXED_SHEETS.payment))
+    readSheet(FIXED_SHEETS.products),
+    readSheet(FIXED_SHEETS.promotions),
+    readSheet(FIXED_SHEETS.faq),
+    readSheet(FIXED_SHEETS.personality),
+    readSheet(FIXED_SHEETS.payment)
   ]);
-
-  // บุคลิก เอาแถวแรกพอ
-  const persona = personalityRows?.[0] || {
-    'ชื่อพนักงาน': 'แอดมิน',
-    'ชื่อเพจ': '',
-    'บุคลิก': 'สุภาพ จริงใจ ช่วยเต็มที่',
-    'คำเรียกลูกค้า': 'คุณลูกค้า',
-    'คำเรียกตัวเองแอดมิน': 'แอดมิน',
-    'คำตอบเมื่อไม่รู้': 'ขออนุญาตเช็คข้อมูลแล้วรีบแจ้งนะคะ',
-    'เพศ': 'หญิง'
-  };
 
   cache.products = products;
   cache.promotions = promotions;
   cache.faq = faq;
-  cache.persona = persona;
+  cache.persona = personalityRows?.[0] || {
+    'ชื่อพนักงาน': 'แอดมิน',
+    'ชื่อเพจ': '',
+    'บุคลิก': 'สุภาพ จริงใจ ฉับไว',
+    'คำเรียกลูกค้า': 'คุณลูกค้า',
+    'คำเรียกตัวเองแอดมิน': 'แอดมิน',
+    'คำตอบเมื่อไม่รู้': 'ขออนุญาตเช็คข้อมูลแล้วแจ้งกลับทันทีนะคะ',
+    'เพศ': 'หญิง'
+  };
   cache.payment = payment;
+
   PRODUCT_ALIAS_INDEX = buildAliasIndex(products);
 }
 
-// ----------------------- PROMOTIONS -----------------------
+// ----------------------- PROMOTION ENGINE -----------------
+// Promotions headers:
+//  รหัสโปรโมชั่น | รายละเอียดโปรโมชั่น | ประเภทคำนวณ | เงื่อนไข | ใช้กับสินค้า | ใช้กับหมวดหมู่
+// ประเภทคำนวณ: BUY_X_GET_Y, PERCENT, FIXED_DISCOUNT, FREE_SHIPPING
 function parseConditions(s = '') {
   const out = {};
   splitList(s).forEach(pair => {
@@ -227,7 +180,6 @@ function parseConditions(s = '') {
   });
   return out;
 }
-
 function promoAppliesToItem(promo, item) {
   const bySku = splitList(promo['ใช้กับสินค้า']).map(x => x.toLowerCase());
   const byCat = splitList(promo['ใช้กับหมวดหมู่']).map(x => x.toLowerCase());
@@ -237,10 +189,8 @@ function promoAppliesToItem(promo, item) {
   const catMatch = byCat.length ? byCat.includes(cat) : true;
   return skuMatch && catMatch;
 }
-
 function computePromotion(cart) {
   if (!cart?.length) return { discount: 0, code: '', detail: '' };
-
   let best = { discount: 0, code: '', detail: '' };
   for (const promo of cache.promotions) {
     const type = (promo['ประเภทคำนวณ'] || '').toUpperCase();
@@ -250,14 +200,13 @@ function computePromotion(cart) {
 
     const qty = appliedItems.reduce((s, it) => s + Number(it.qty || 0), 0);
     const amount = appliedItems.reduce((s, it) => s + (Number(it.price || 0) * Number(it.qty || 0)), 0);
-
     if (cond.min_qty && qty < Number(cond.min_qty)) continue;
     if (cond.min_amount && amount < Number(cond.min_amount)) continue;
 
     let discount = 0;
     let detail = '';
-
     if (type === 'BUY_X_GET_Y') {
+      // ตัวอย่าง: min_qty=5,get_free=1 ฟรีถูกสุด
       const free = Number(cond.get_free || 1);
       const prices = [];
       appliedItems.forEach(it => {
@@ -265,18 +214,17 @@ function computePromotion(cart) {
       });
       prices.sort((a, b) => a - b);
       discount = prices.slice(0, free).reduce((s, v) => s + v, 0);
-      detail = `โปรซื้อครบ ${cond.min_qty} แถม ${free}`;
+      detail = promo['รายละเอียดโปรโมชั่น'] || `ซื้อครบ ${cond.min_qty} แถม ${free}`;
     } else if (type === 'PERCENT') {
       const pct = Number(cond.percent || 0);
       discount = Math.floor(amount * pct / 100);
-      detail = `ส่วนลด ${pct}%`;
+      detail = promo['รายละเอียดโปรโมชั่น'] || `ส่วนลด ${pct}%`;
     } else if (type === 'FIXED_DISCOUNT') {
       discount = Number(cond.amount || 0);
-      detail = `ลดทันที ${THB(discount)}`;
+      detail = promo['รายละเอียดโปรโมชั่น'] || `ลดทันที ${THB(discount)}`;
     } else if (type === 'FREE_SHIPPING') {
-      const fee = Number(cond.fee || 40);
-      discount = fee;
-      detail = `ส่งฟรี (หักค่าขนส่ง ${THB(fee)})`;
+      discount = Number(cond.fee || 40);
+      detail = promo['รายละเอียดโปรโมชั่น'] || `ส่งฟรี (หักค่าขนส่ง ${THB(discount)})`;
     } else {
       continue;
     }
@@ -285,34 +233,30 @@ function computePromotion(cart) {
       best = {
         discount,
         code: promo['รหัสโปรโมชั่น'] || '',
-        detail: promo['รายละเอียดโปรโมชั่น'] || detail
+        detail
       };
     }
   }
   return best;
 }
 
-// ----------------------- PAYMENT --------------------------
+// ----------------------- PAYMENT PICKER -------------------
 function pickPayment(category = 'all') {
-  const rows = cache.payment || [];
+  const rows = cache.payment;
   const cat = (category || '').toLowerCase();
-
   let row = rows.find(r => (r['category'] || '').toLowerCase() === cat);
   if (!row) row = rows.find(r => (r['category'] || '').toLowerCase() === 'all');
   if (!row) row = rows[0];
-
   return {
     method: row?.['method'] || 'โอน/พร้อมเพย์/COD',
-    detail: row?.['detail'] || '',
-    qrcode: row?.['qrcode'] || ''
+    detail: row?.['detail'] || '' // รองรับ URL QR image
   };
 }
 
-// ----------------------- FAQ ------------------------------
+// ----------------------- FAQ MATCH ------------------------
 function matchFAQ(text) {
   const t = (text || '').toLowerCase();
   let best = null, bestScore = 0;
-
   for (const f of cache.faq) {
     const q = (f['คำถาม'] || '').toLowerCase();
     const keys = splitList(f['คำหลัก'] || '');
@@ -326,14 +270,13 @@ function matchFAQ(text) {
 }
 
 // ----------------------- SESSIONS -------------------------
-const sessions = new Map();
-
+const sessions = new Map(); // userId -> state
 function newSession(userId) {
   const s = {
     userId,
-    stage: 'idle',                 // idle | picking_variant | picking_qty | confirming | collecting_info
-    currentItem: null,             // { sku, name, category, price, options[], chosenOption }
-    cart: [],                      // [{ sku, name, category, price, chosenOption, qty }, ...]
+    stage: 'idle',       // idle | picking_option | picking_qty | confirming | collecting_info
+    currentItem: null,   // { sku, name, category, price, options[], chosenOption }
+    cart: [],            // [{ sku, name, category, price, chosenOption, qty }]
     address: '',
     phone: '',
     customer: '',
@@ -342,15 +285,13 @@ function newSession(userId) {
   sessions.set(userId, s);
   return s;
 }
-
 function getSession(userId) {
   const s = sessions.get(userId);
   if (!s) return newSession(userId);
   s.lastActive = Date.now();
   return s;
 }
-
-async function saveSessionRow(s, note = '') {
+async function saveSessionRow(s, note='') {
   try {
     await appendRow(FIXED_SHEETS.sessions, {
       'timestamp': dayjs().format('YYYY-MM-DD HH:mm:ss'),
@@ -359,73 +300,72 @@ async function saveSessionRow(s, note = '') {
       'cart': JSON.stringify(s.cart),
       'note': note
     });
-  } catch (_) {}
+  } catch (e) { /* ignore */ }
 }
 
 // ----------------------- PRODUCTS -------------------------
 function searchProductsByText(text) {
-  const tokens = splitList(text.toLowerCase()).concat([text.toLowerCase()]);
-  const matched = new Set();
-  for (const tok of tokens) {
-    const arr = PRODUCT_ALIAS_INDEX.get(tok);
-    if (arr) arr.forEach(p => matched.add(p));
-  }
-  // fallback
-  const t = text.toLowerCase();
-  cache.products.forEach(p => {
-    if ((p['ชื่อสินค้า'] || '').toLowerCase().includes(t)) matched.add(p);
-    if ((p['รหัสสินค้า'] || '').toLowerCase() === t) matched.add(p);
-  });
-  return [...matched];
-}
+  const q = (text || '').toLowerCase().trim();
+  const tokens = splitList(q);
+  const set = new Set();
 
+  // Alias index
+  for (const tok of tokens.concat([q])) {
+    const arr = PRODUCT_ALIAS_INDEX.get(tok);
+    if (arr) arr.forEach(p => set.add(p));
+  }
+
+  // fallback by name contains
+  cache.products.forEach(p => {
+    const name = (p['ชื่อสินค้า'] || '').toLowerCase();
+    const sku = (p['รหัสสินค้า'] || '').toLowerCase();
+    if (name.includes(q) || sku === q) set.add(p);
+  });
+
+  return [...set];
+}
 function extractOptions(p) {
   return splitList(p['ตัวเลือก'] || '');
 }
 
-function optionWordByCategory(cat = '') {
-  const c = (cat || '').toLowerCase();
-  if (c === 'food') return 'รสชาติ';
-  return 'รุ่น';
-}
-
-// ----------------------- AI PROMPT ------------------------
+// ----------------------- AI -------------------------------
 function buildSystemPrompt() {
   const ps = cache.persona || {};
   const agent = ps['ชื่อพนักงาน'] || 'แอดมิน';
-  const page = ps['ชื่อเพจ'] || '';
-  const tone = ps['บุคลิก'] || 'สุภาพ จริงใจ ช่วยเต็มที่';
+  const page = ps['ชื่อเพจ'] ? `จากเพจ ${ps['ชื่อเพจ']}` : '';
+  const tone = ps['บุคลิก'] || 'สุภาพ จริงใจ ฉับไว';
   const callCustomer = ps['คำเรียกลูกค้า'] || 'คุณลูกค้า';
   const callSelf = ps['คำเรียกตัวเองแอดมิน'] || 'แอดมิน';
-  const unknown = ps['คำตอบเมื่อไม่รู้'] || 'ขออนุญาตเช็คข้อมูลแล้วรีบแจ้งนะคะ';
+  const unknown = ps['คำตอบเมื่อไม่รู้'] || 'ขออนุญาตเช็คข้อมูลแล้วแจ้งกลับทันทีนะคะ';
   const gender = ps['เพศ'] || 'หญิง';
 
   return `
-คุณคือ “${agent}”${page ? ` จากเพจ ${page}` : ''} เพศ${gender}
-บุคลิก: ${tone}
-เรียกลูกค้าว่า “${callCustomer}” และเรียกตัวเองว่า “${callSelf}”
-พูดไทยแบบเป็นกันเอง ใส่อิโมจิพอดี ไม่ยาวเกินไป
+คุณคือ “${agent}” ${page} เพศ${gender}. บุคลิก: ${tone}.
+พูดไทยเป็นธรรมชาติ ใส่อิโมจิพองาม หลีกเลี่ยงบรรทัดยาวๆ
+เรียกลูกค้าว่า “${callCustomer}” เรียกตัวเองว่า “${callSelf}”.
 
 กฎ:
-- ถ้าลูกค้าสนใจสินค้า ให้ถามให้ครบ: ชื่อสินค้า → ${'รสชาติ/รุ่น'} (ขึ้นกับหมวดหมู่สินค้า) → จำนวน
-- ถ้าลูกค้าถามอย่างอื่นกลางคัน ให้ตอบ แล้วพากลับไปขั้นตอนค้างไว้
-- ห้ามเปิดเผยรหัสสินค้า
-- ถ้าไม่ทราบจริง ให้ตอบ: “${unknown}”
-`.trim();
+- ถ้าพูดถึง "น้ำพริก" ใช้คำว่า "รสชาติ" แทน "รุ่น"
+- อย่าส่ง "รหัสสินค้า" ให้ลูกค้า
+- อย่าเริ่มต้นทุกข้อความด้วยคำทักซ้ำๆ (เช่น สวัสดีค่ะ) หากคุยอยู่แล้ว
+- ถ้าลูกค้าถามกว้าง ให้สรุปตัวเลือกสั้นๆ เช่น “น้ำพริกมี: เห็ด, กากหมู, โครตกุ้ง … ต้องการรสไหนคะ?”
+- ถ้าไม่ทราบจริง ให้ตอบ: “${unknown}” และชวนเก็บรายละเอียดเพื่อส่งต่อแอดมิน
+  `.trim();
 }
 
-async function aiReply(userText, extraContext = '') {
+async function aiReply(userText, extraContext='') {
   try {
     const sys = buildSystemPrompt();
-    const res = await openai.chat.completions.create({
+    const payload = {
       model: 'gpt-4o-mini',
-      temperature: 0.4,
-      max_tokens: 350,
+      temperature: 0.3,
+      max_tokens: 250,
       messages: [
         { role: 'system', content: sys },
-        { role: 'user', content: `${extraContext ? `[ข้อมูล]\n${extraContext}\n\n` : ''}${userText}` }
+        { role: 'user', content: `${extraContext ? `[ข้อมูล]\n${extraContext}\n\n`:''}${userText}` }
       ]
-    });
+    };
+    const res = await openai.chat.completions.create(payload);
     return res.choices?.[0]?.message?.content?.trim() || null;
   } catch (e) {
     console.error('OpenAI error:', e?.message);
@@ -436,266 +376,259 @@ async function aiReply(userText, extraContext = '') {
 // ----------------------- LINE HELPERS ---------------------
 function msgText(text) { return { type: 'text', text }; }
 function msgImage(url) { return { type: 'image', originalContentUrl: url, previewImageUrl: url }; }
-
-async function notifyAdmin(text, extraMsgs = []) {
+async function notifyAdmin(text, extra=[]) {
   if (!ADMIN_GROUP_ID) return;
-  try {
-    await lineClient.pushMessage(ADMIN_GROUP_ID, [msgText(text), ...extraMsgs].slice(0, 5));
-  } catch (e) {
-    console.error('notifyAdmin error:', e.message);
-  }
+  try { await lineClient.pushMessage(ADMIN_GROUP_ID, [msgText(text), ...extra].slice(0,5)); }
+  catch(e){ console.error('notifyAdmin error:', e.message); }
 }
 
 // ----------------------- ORDER HELPERS --------------------
 function calcCartSummary(cart) {
-  const sub = cart.reduce((s, it) => s + (Number(it.price || 0) * Number(it.qty || 0)), 0);
+  const sub = cart.reduce((s, it) => s + (Number(it.price||0) * Number(it.qty||0)), 0);
   const promo = computePromotion(cart);
-  const total = Math.max(0, sub - (promo.discount || 0));
+  const total = Math.max(0, sub - (promo.discount||0));
   return { sub, promo, total };
 }
-
 function renderCart(cart) {
-  if (!cart?.length) return '-';
-  return cart.map((it, idx) =>
-    `${idx + 1}. ${it.name}${it.chosenOption ? ` (${it.chosenOption})` : ''} x ${it.qty} = ${THB(it.price * it.qty)}`
-  ).join('\n');
+  if (!cart?.length) return '—';
+  return cart.map((it, idx) => `${idx+1}. ${it.name}${it.chosenOption?` (${it.chosenOption})`:''} x ${it.qty} = ${THB(it.price*it.qty)}`).join('\n');
 }
-
-async function persistOrder(userId, s, address = '', phone = '', status = 'รอยืนยัน') {
+async function persistOrder(userId, s, address = '', phone = '', status='รอยืนยัน') {
   const ts = dayjs().format('YYYYMMDDHHmmss');
-  const orderNo = `ORD-${ts}-${(userId || '').slice(-4)}`;
+  const orderNo = `ORD-${ts}-${(userId||'').slice(-4)}`;
   const summary = calcCartSummary(s.cart);
   const promoText = summary.promo.code ? `${summary.promo.code} - ${summary.promo.detail}` : '';
-
   for (const it of s.cart) {
     await appendRow(FIXED_SHEETS.orders, {
       'เลขที่ออเดอร์': orderNo,
-      'รหัสสินค้า': it.sku || '',
-      'ชื่อสินค้า': it.name || '',
+      'รหัสสินค้า': it.sku,
+      'ชื่อสินค้า': it.name,
       'ตัวเลือก': it.chosenOption || '',
-      'จำนวน': it.qty || 1,
-      'ราคารวม': (Number(it.price || 0) * Number(it.qty || 0)) || 0,
+      'จำนวน': it.qty,
+      'ราคารวม': it.price * it.qty,
       'โปรโมชั่นที่ใช้': promoText,
       'ชื่อ-ที่อยู่': address || s.address || '',
       'เบอร์โทร': phone || s.phone || '',
-      'สถานะ': status
+      'สถานะ': status,
+      'qrcode': '' // เผื่ออนาคตใส่ URL QR ต่อออเดอร์
     });
   }
   return { orderNo, summary };
 }
 
-// ----------------------- MAIN FLOW ------------------------
-async function handleText(userId, replyToken, textRaw) {
-  const text = (textRaw || '').trim();
-  const low = text.toLowerCase();
-  const s = getSession(userId);
+// ----------------------- CORE HANDLER ---------------------
+function conciseCategoryList() {
+  // แสดงชื่อสินค้าสั้นๆ แบบกลุ่ม
+  const cats = {};
+  for (const p of cache.products) {
+    const cat = p['หมวดหมู่'] || 'อื่นๆ';
+    if (!cats[cat]) cats[cat] = new Set();
+    cats[cat].add(p['ชื่อสินค้า']);
+  }
+  const lines = [];
+  Object.keys(cats).forEach(cat => {
+    const arr = [...cats[cat]].slice(0,5);
+    lines.push(`• ${cat}: ${arr.join(', ')}`);
+  });
+  return lines.join('\n');
+}
 
-  // 0) FAQ interrupt
-  const faq = matchFAQ(text);
-  if (faq) {
-    await lineClient.replyMessage(replyToken, [msgText(faq)]);
+function optionsText(p) {
+  const ops = extractOptions(p);
+  if (!ops.length) return '';
+  // เน้นคำว่า “รสชาติ” สำหรับหมวด น้ำพริก
+  const isNamPrik = ((p['หมวดหมู่']||'').toLowerCase().includes('น้ำพริก'));
+  return isNamPrik ? `รสชาติที่มี: ${ops.join(', ')}` : `ตัวเลือกที่มี: ${ops.join(', ')}`;
+}
+
+async function handleText(userId, replyToken, text, isFirstMsg=false) {
+  const s = getSession(userId);
+  const lower = (text||'').toLowerCase();
+
+  // ---------- FAQ interrupt ----------
+  const faqAns = matchFAQ(text);
+  if (faqAns) {
+    await lineClient.replyMessage(replyToken, [msgText(faqAns)]);
     if (s.stage !== 'idle' && s.currentItem) {
-      const ow = optionWordByCategory(s.currentItem.category);
+      const p = s.currentItem;
+      const isNamPrik = ((p.category||'').toLowerCase().includes('น้ำพริก'));
       await lineClient.pushMessage(userId, [
-        msgText(`ต่อจากเมื่อกี้นะคะ 😊 ต้องการ “${s.currentItem.name}” เลือก${ow}ไหนคะ${s.currentItem.options?.length ? ` (ตัวเลือก: ${s.currentItem.options.join(', ')})` : ''}`)
+        msgText(`ต่อจากเมื่อกี้นะคะ 😊 ต้องการ “${p.name}”${isNamPrik?' รสไหนคะ?':' ตัวไหนคะ?'}\n${optionsText({ 'หมวดหมู่': p.category, 'ตัวเลือก': (p.options||[]).join(', ') })}`)
       ]);
     }
     return;
   }
 
-  // 1) ถ้ากำลังรอ "ตัวเลือก" ตามหมวด
-  if (s.stage === 'picking_variant' && s.currentItem) {
-    const choice = splitList(text)[0] || '';
-    const options = s.currentItem.options || [];
-    const ow = optionWordByCategory(s.currentItem.category);
-
-    if (!options.length) {
-      // ไม่มีตัวเลือก → ข้ามไปถามจำนวน
+  // ---------- Flow: choose option (รสชาติ/ตัวเลือก) ----------
+  if (s.stage === 'picking_option' && s.currentItem) {
+    const choice = splitList(text)[0]?.trim();
+    const ops = s.currentItem.options || [];
+    if (!ops.length) {
       s.stage = 'picking_qty';
-      await saveSessionRow(s, 'no_options_skip_to_qty');
-      await lineClient.replyMessage(replyToken, [msgText(`ต้องการ “${s.currentItem.name}” จำนวนกี่ชิ้นคะ? (เช่น 2, 5)`)]); 
+      await lineClient.replyMessage(replyToken, [msgText(`ต้องการ “${s.currentItem.name}” จำนวนกี่ชิ้นคะ (เช่น 2, 5)`)]); 
       return;
     }
-
-    const matched = options.find(op => op.toLowerCase().includes(choice.toLowerCase()));
+    const matched = ops.find(op => op.toLowerCase().includes((choice||'').toLowerCase()));
     if (matched) {
       s.currentItem.chosenOption = matched;
       s.stage = 'picking_qty';
       await saveSessionRow(s, 'picked_option');
-      await lineClient.replyMessage(replyToken, [msgText(`รับทราบค่ะ ต้องการ “${s.currentItem.name} (${matched})” จำนวนกี่ชิ้นคะ? (เช่น 2, 5)`)]); 
+      await lineClient.replyMessage(replyToken, [msgText(`ต้องการ “${s.currentItem.name}”${matched?` (${matched})`:''} จำนวนกี่ชิ้นคะ (เช่น 2, 5)`)]); 
+      return;
+    } else {
+      const isNamPrik = ((s.currentItem.category||'').toLowerCase().includes('น้ำพริก'));
+      await lineClient.replyMessage(replyToken, [
+        msgText(`${isNamPrik?'รสชาติ':'ตัวเลือก'}ที่มี: ${ops.join(', ')}\nเลือกอันไหนคะ?`)
+      ]);
       return;
     }
-    // ไม่ตรง → แสดงรายการสั้นๆ
-    await lineClient.replyMessage(replyToken, [msgText(`เลือก${ow}ได้เลยค่ะ:\n- ${options.join('\n- ')}`)]);
-    return;
   }
 
-  // 2) ถ้ากำลังรอ "จำนวน"
+  // ---------- Flow: choose quantity ----------
   if (s.stage === 'picking_qty' && s.currentItem) {
     const m = text.match(/\d+/);
-    if (!m) {
+    if (m) {
+      const qty = Math.max(1, Number(m[0]));
+      const it = s.currentItem;
+      s.cart.push({
+        sku: it.sku,
+        name: it.name,
+        category: it.category,
+        chosenOption: it.chosenOption || '',
+        price: Number(it.price || 0),
+        qty
+      });
+      s.currentItem = null;
+      s.stage = 'confirming';
+      await saveSessionRow(s, 'qty_added');
+
+      const sum = calcCartSummary(s.cart);
+      await lineClient.replyMessage(replyToken, [
+        msgText(`รับทราบค่ะ 🧾\n${renderCart(s.cart)}\nยอดสุทธิ: ${THB(sum.total)}${sum.promo.code?`\nโปรฯ: ${sum.promo.detail}`:''}\n\nจะ “เพิ่มสินค้า” ต่อ หรือ “สรุปออเดอร์” เลยดีคะ?`)
+      ]);
+      return;
+    } else {
       await lineClient.replyMessage(replyToken, [msgText(`พิมพ์เป็นตัวเลขจำนวนชิ้นนะคะ เช่น 2 หรือ 5`)]); 
       return;
     }
-    const qty = Math.max(1, Number(m[0]));
-    s.cart.push({
-      sku: s.currentItem.sku,
-      name: s.currentItem.name,
-      category: s.currentItem.category,
-      chosenOption: s.currentItem.chosenOption || '',
-      price: Number(s.currentItem.price || 0),
-      qty
-    });
-    const cartTxt = renderCart(s.cart);
-    const sum = calcCartSummary(s.cart);
-    s.stage = 'confirming';
-    s.currentItem = null;
-    await saveSessionRow(s, 'qty_added');
+  }
+
+  // ---------- Detect products from text ----------
+  const found = searchProductsByText(text);
+
+  // ถ้าพบสินค้าอย่างน้อย 1: เข้า flow เลือกตัวเลือก/จำนวน
+  if (found.length >= 1) {
+    if (found.length > 1) {
+      // ถ้าพูดกว้างไป สรุปสั้นๆ
+      const names = found.slice(0,5).map(x => `• ${x['ชื่อสินค้า']}`).join('\n');
+      await lineClient.replyMessage(replyToken, [msgText(`หมายถึงตัวไหนคะ 😊\n${names}\n\nพิมพ์ชื่อให้ชัดขึ้นหน่อย เช่น “น้ำพริกเห็ด รสต้มยำ”`)]); 
+      return;
+    }
+
+    const p = found[0];
+    const ops = extractOptions(p);
+    s.currentItem = {
+      sku: p['รหัสสินค้า'],
+      name: p['ชื่อสินค้า'],
+      category: p['หมวดหมู่'] || '',
+      price: Number(p['ราคา'] || 0),
+      options: ops
+    };
+    await saveSessionRow(s, 'product_detected');
+
+    if (ops.length) {
+      s.stage = 'picking_option';
+      const isNamPrik = ((p['หมวดหมู่']||'').toLowerCase().includes('น้ำพริก'));
+      await lineClient.replyMessage(replyToken, [
+        msgText(`ต้องการ “${p['ชื่อสินค้า']}” ${isNamPrik?'รสไหนคะ?':'ตัวไหนคะ?'}\n${optionsText(p)}`)
+      ]);
+    } else {
+      s.stage = 'picking_qty';
+      await lineClient.replyMessage(replyToken, [msgText(`ต้องการ “${p['ชื่อสินค้า']}” จำนวนกี่ชิ้นคะ (เช่น 2, 5)`)]); 
+    }
+    return;
+  }
+
+  // ---------- Confirming / Checkout ----------
+  if (/สรุป|จบ|ยืนยัน|ปิด/i.test(text)) {
+    if (!s.cart.length) {
+      await lineClient.replyMessage(replyToken, [
+        msgText(`ยังไม่มีสินค้าในตะกร้าเลยค่ะ 😅 พิมพ์ชื่อสินค้าที่ต้องการได้เลย เช่น “น้ำพริกเห็ด”`)
+      ]);
+      return;
+    }
+    s.stage = 'collecting_info';
+    await saveSessionRow(s, 'start_checkout');
+    const cats = [...new Set(s.cart.map(it => it.category || 'all'))];
+    const pay = pickPayment(cats[0] || 'all');
     await lineClient.replyMessage(replyToken, [
-      msgText(`เพิ่มลงตะกร้าแล้ว 🧺\n${cartTxt}\n\nยอดสุทธิชั่วคราว: ${THB(sum.total)}${sum.promo.code ? `\nโปรฯ: ${sum.promo.detail}` : ''}\n\nต้องการเพิ่มสินค้าอีกไหมคะ หรือพิมพ์ “สรุปออเดอร์” ได้เลยค่ะ ✨`)
+      msgText(`รบกวนแจ้ง “ชื่อ-ที่อยู่จัดส่ง” และ “เบอร์โทร” ด้วยนะคะ`),
+      msgText(`ช่องทางชำระ: ${pay.method}\n${pay.detail ? `รายละเอียด: ${pay.detail}` : ''}${/พร้อมเพย์|qr/i.test(pay.method+pay.detail) ? '\nต้องการ QR โอนเงิน? พิมพ์ “ขอ QR” ได้เลยค่ะ' : ''}${/cod|ปลายทาง/i.test(pay.method+pay.detail) ? '\nเก็บเงินปลายทางได้ค่ะ พิมพ์ “เก็บปลายทาง”' : ''}`)
     ]);
     return;
   }
 
-  // 3) โหมดยืนยัน / วนขายต่อ
-  if (s.stage === 'confirming' || s.stage === 'idle') {
-    // จบการขาย
-    if (/สรุป|ยืนยัน|ปิดการขาย|จบ/i.test(text)) {
-      if (!s.cart.length) {
-        await lineClient.replyMessage(replyToken, [msgText(`ยังไม่มีสินค้าในตะกร้าค่ะ 😊 บอกชื่อสินค้าที่ต้องการได้เลย`)]);
-        return;
-      }
-      s.stage = 'collecting_info';
-      await saveSessionRow(s, 'start_checkout');
-
-      // เลือกช่องทางจ่ายหลักจากหมวดแรกในตะกร้า
-      const cats = [...new Set(s.cart.map(it => it.category || 'all'))];
-      const pay = pickPayment(cats[0] || 'all');
-      const payLine1 = `ช่องทางชำระ: ${pay.method}`;
-      const payLine2 = pay.detail ? `รายละเอียด: ${pay.detail}` : '';
-      const qrHint  = pay.qrcode ? `มี QR พร้อมเพย์ให้สแกนได้เลย 📷` : '';
-      const codHint = /cod|ปลายทาง/i.test(pay.method + pay.detail) ? `หากต้องการเก็บเงินปลายทาง พิมพ์ “เก็บปลายทาง” ได้เลย 📦` : '';
-
-      await lineClient.replyMessage(replyToken, [
-        msgText(`รับทราบค่ะ 🧾 กรุณาส่ง “ชื่อ-ที่อยู่” และ “เบอร์โทร” สำหรับจัดส่งด้วยนะคะ`),
-        msgText([payLine1, payLine2, qrHint, codHint].filter(Boolean).join('\n'))
-      ]);
-      return;
-    }
-
-    // ตรวจว่าข้อความนี้คือการ "เพิ่มสินค้าใหม่"
-    const found = searchProductsByText(text);
-    if (found.length === 1) {
-      const p = found[0];
-      const options = extractOptions(p);
-      const ow = optionWordByCategory(p['หมวดหมู่'] || '');
-      const item = {
-        sku: p['รหัสสินค้า'],
-        name: p['ชื่อสินค้า'],
-        category: p['หมวดหมู่'] || '',
-        price: Number(p['ราคา'] || 0),
-        options
-      };
-      s.currentItem = item;
-
-      s.stage = options.length ? 'picking_variant' : 'picking_qty';
-      await saveSessionRow(s, 'product_detected');
-
-      if (options.length) {
-        await lineClient.replyMessage(replyToken, [
-          msgText(`${p['ชื่อสินค้า']} มี${ow}ให้เลือกค่ะ:\n- ${options.join('\n- ')}\n\nต้องการ${ow}ไหนเอ่ย?`)
-        ]);
-      } else {
-        await lineClient.replyMessage(replyToken, [
-          msgText(`ต้องการ “${p['ชื่อสินค้า']}” จำนวนกี่ชิ้นคะ? (เช่น 2, 5)`)
-        ]);
-      }
-      return;
-    } else if (found.length > 1) {
-      const names = found.slice(0, 8).map(x => `• ${x['ชื่อสินค้า']}`).join('\n');
-      await lineClient.replyMessage(replyToken, [msgText(`หมายถึงตัวไหนคะ 😊\n${names}\n\nพิมพ์ชื่อให้ชัดขึ้นนิดนึงได้ไหมคะ`)]); 
-      return;
-    }
+  if (s.stage === 'confirming') {
+    // ลูกค้ายังพิมพ์ชื่อสินค้าอื่นเพิ่มได้
+    // ถ้าไม่ match อะไรเลย ให้ AI ช่วยตอบสั้น + ดันกลับเข้าขาย
+    const shortList = conciseCategoryList();
+    const ai = await aiReply(text, `[รายการหมวด/สินค้า]\n${shortList}`);
+    await lineClient.replyMessage(replyToken, [
+      msgText(ai || 'รับทราบค่ะ 😊 ต้องการสินค้าตัวไหนเพิ่มเติมคะ?')
+    ]);
+    return;
   }
 
-  // 4) เก็บข้อมูลที่อยู่/โทร/วิธีจ่าย
   if (s.stage === 'collecting_info') {
-    // QR
     if (/qr|คิวอาร์|พร้อมเพย์/i.test(text)) {
       const cats = [...new Set(s.cart.map(it => it.category || 'all'))];
       const pay = pickPayment(cats[0] || 'all');
-      if (pay.qrcode) {
+      const qrUrl = (pay.detail || '').match(/https?:\/\/\S+/)?.[0];
+      if (qrUrl) {
         await lineClient.replyMessage(replyToken, [
-          msgText(`ส่ง QR ให้แล้วค่ะ โอนได้เลย แล้วแนบสลิปในแชทนี้ได้เลยนะคะ 🙏`),
-          msgImage(pay.qrcode)
+          msgText(`ส่ง QR ให้แล้วค่ะ โอนแล้วแจ้งสลิปในแชทนี้ได้เลยนะคะ 🙏`),
+          msgImage(qrUrl)
         ]);
       } else {
-        await lineClient.replyMessage(replyToken, [msgText(`ตอนนี้ยังไม่ได้แนบ QR ในชีท Payment ค่ะ (คอลัมน์ qrcode)`)]); 
+        await lineClient.replyMessage(replyToken, [msgText(`รายละเอียดการชำระ: ${pay.detail || '—'}`)]);
       }
       return;
     }
-    // COD
     if (/เก็บปลายทาง|cod/i.test(text)) {
       s.paymentMethod = 'COD';
-      await lineClient.replyMessage(replyToken, [msgText(`รับทราบค่ะ เก็บเงินปลายทางได้ค่ะ 📦 รบกวนส่ง “ชื่อ-ที่อยู่” และ “เบอร์โทร” ด้วยนะคะ`)]); 
+      await lineClient.replyMessage(replyToken, [msgText(`รับทราบ “เก็บเงินปลายทาง” ค่ะ 📦 แจ้ง “ชื่อ-ที่อยู่” และ “เบอร์โทร” ด้วยนะคะ`)]); 
       return;
     }
-
-    // ดึงเบอร์ & ที่อยู่แบบง่าย
+    // จับเบอร์+ที่อยู่แบบง่าย
     const phone = text.match(/0\d{8,9}/)?.[0] || '';
     if (phone) s.phone = phone;
-    if (text.length > 10 && !/qr|ปลายทาง|cod/i.test(text)) {
-      s.address = text;
-    }
+    if (text.length > 10 && !/qr|ปลายทาง|cod/i.test(text)) s.address = text;
 
     if (s.address && s.phone) {
-      const { orderNo, summary } = await persistOrder(userId, s, s.address, s.phone, 'รอชำระ/จัดส่ง');
-      const cartTxt = renderCart(s.cart);
-
+      const { orderNo, summary } = await persistOrder(userId, s, s.address, s.phone, s.paymentMethod==='COD'?'รอจัดส่ง(COD)':'รอชำระ');
       await lineClient.replyMessage(replyToken, [
-        msgText(`สรุปออเดอร์ #${orderNo}\n${cartTxt}\nโปรฯ: ${summary.promo.code ? summary.promo.detail : '—'}\nยอดสุทธิ: ${THB(summary.total)}\n\nจัดส่งไปที่: ${s.address}\nโทร: ${s.phone}\n\nขอบคุณมากค่ะ 🥰`)
+        msgText(`สรุปออเดอร์ #${orderNo}\n${renderCart(s.cart)}\nโปรฯ: ${summary.promo.code?summary.promo.detail:'—'}\nยอดสุทธิ: ${THB(summary.total)}\n\nจัดส่ง: ${s.address}\nโทร: ${s.phone}\n\nขอบคุณมากค่ะ 🥰`)
       ]);
-
-      await notifyAdmin(`🛒 ออเดอร์ใหม่ #${orderNo}\n${cartTxt}\nยอดสุทธิ: ${THB(summary.total)}\nที่อยู่: ${s.address}\nโทร: ${s.phone}`);
-
+      await notifyAdmin(`🛒 ออเดอร์ใหม่ #${orderNo}\n${renderCart(s.cart)}\nยอด: ${THB(summary.total)}\nที่อยู่: ${s.address}\nโทร: ${s.phone}${s.paymentMethod?' \nชำระ: '+s.paymentMethod:''}`);
       sessions.delete(userId);
       return;
     } else {
-      await lineClient.replyMessage(replyToken, [msgText(`รบกวนส่ง “ชื่อ-ที่อยู่” และ “เบอร์โทร” เพิ่มเติมด้วยนะคะ 😊`)]); 
+      await lineClient.replyMessage(replyToken, [msgText(`ยังขาด “ชื่อ-ที่อยู่” หรือ “เบอร์โทร” ค่ะ ส่งมาได้เลยนะคะ 😊`)]);
       return;
     }
   }
 
-  // 5) Fallback → AI ช่วยตอบ แต่ปิดท้ายด้วยการดันกลับสู่การขาย
-  const topProducts = cache.products.slice(0, 6).map(p => {
-    const ow = optionWordByCategory(p['หมวดหมู่'] || '');
-    const opts = extractOptions(p);
-    return `• ${p['ชื่อสินค้า']} ราคา ${THB(p['ราคา'])}${opts.length ? ` (${ow}: ${opts.join(', ')})` : ''}`;
-  }).join('\n');
-
-  const extra = `[สินค้าแนะนำ]\n${topProducts}`;
-  const ai = await aiReply(text, extra);
-
-  if (ai) {
-    // ถ้ามีสินค้าที่ detect ได้ในข้อความ Fallback → ใส่ CTA ถามต่อ
-    const found = searchProductsByText(text);
-    if (found.length === 1) {
-      const p = found[0];
-      const opts = extractOptions(p);
-      const ow = optionWordByCategory(p['หมวดหมู่'] || '');
-      const tail = opts.length ? `\n\nสนใจ “${p['ชื่อสินค้า']}” ${ow}ไหนคะ?` : `\n\nสนใจ “${p['ชื่อสินค้า']}” กี่ชิ้นคะ?`;
-      await lineClient.replyMessage(replyToken, [msgText(ai + tail)]);
-      return;
-    }
-  }
-
-  await lineClient.replyMessage(replyToken, [msgText(ai || 'รับทราบค่ะ 😊 สนใจสินค้าอะไรเพิ่มเติมบอกแอดมินได้เลยนะคะ')]);
+  // ---------- General small-talk / discovery ----------
+  // สั้น กระชับ ไม่ขายยัดเยียด แต่ดันกลับสู่การขายเบาๆ
+  const shortList = conciseCategoryList();
+  const ai = await aiReply(text, `[หมวดและตัวอย่างสินค้า]\n${shortList}`);
+  await lineClient.replyMessage(replyToken, [msgText(ai || 'รับทราบค่ะ 😊 สนใจหมวดไหนบอกได้เลยค่ะ')]);
 }
 
 // ----------------------- WEB SERVER -----------------------
 const app = express();
-app.get('/', (req, res) => res.send('OK'));
-app.get('/healthz', (req, res) => res.send('ok'));
+app.get('/', (req,res)=>res.send('OK'));
+app.get('/healthz', (req,res)=>res.send('ok'));
 
 app.post('/webhook',
   lineMiddleware(lineConfig),
@@ -707,19 +640,20 @@ app.post('/webhook',
       const events = req.body.events || [];
       for (const ev of events) {
         if (ev.type === 'message' && ev.message?.type === 'text') {
-          const uid = ev.source?.userId || ev.source?.groupId || ev.source?.roomId || 'unknown';
-          try {
-            await appendRow(FIXED_SHEETS.logs, {
-              'timestamp': dayjs().format('YYYY-MM-DD HH:mm:ss'),
-              'userId': uid,
-              'type': 'IN',
-              'text': ev.message.text
-            });
-          } catch (_) {}
-          await handleText(uid, ev.replyToken, ev.message.text);
+          const userId = ev.source?.userId || ev.source?.groupId || ev.source?.roomId || 'unknown';
+          const txt = ev.message.text || '';
+          await appendRow(FIXED_SHEETS.logs, {
+            'timestamp': dayjs().format('YYYY-MM-DD HH:mm:ss'),
+            'userId': userId,
+            'type': 'IN',
+            'text': txt
+          });
+          await handleText(userId, ev.replyToken, txt);
         } else if (ev.type === 'follow') {
-          const hi = `สวัสดีค่ะ 😊 ยินดีต้อนรับ ร้านของเรามีหลายรายการให้เลือกนะคะ พิมพ์ชื่อสินค้าที่สนใจได้เลยค่ะ`;
-          await lineClient.replyMessage(ev.replyToken, [msgText(hi)]);
+          // ทักครั้งแรกเท่านั้น
+          await lineClient.replyMessage(ev.replyToken, [
+            msgText('ยินดีต้อนรับค่ะ ✨ พิมพ์ชื่อสินค้า/หมวดที่สนใจได้เลย เช่น “น้ำพริกเห็ด” หรือ “รถเข็นไฟฟ้า”')
+          ]);
         }
       }
     } catch (err) {
@@ -731,22 +665,17 @@ app.post('/webhook',
           'type': 'ERR',
           'text': err?.message || String(err)
         });
-      } catch (_) {}
+      } catch(e) { /* ignore */ }
     }
   }
 );
 
-// รีโหลด cache ทุก 10 นาที
-setInterval(async () => {
-  try { await loadAllData(); } catch (_) {}
-}, 10 * 60 * 1000);
-
 // ----------------------- START ----------------------------
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, async () => {
+const port = Number(PORT || 10000);
+app.listen(port, async () => {
   try {
     await loadAllData();
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${port}`);
   } catch (e) {
     console.error('❌ Google Sheet Error:', e.message);
   }
