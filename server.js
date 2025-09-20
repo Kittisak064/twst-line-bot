@@ -288,9 +288,9 @@ const sessions = new Map(); // userId -> state
 function newSession(userId) {
   const s = {
     userId,
-    stage: 'idle',         // idle | picking_variant | picking_qty | confirming | collecting_info
-    currentItem: null,     // { sku, name, category, options[], chosenOption, price }
-    cart: [],              // { sku, name, category, chosenOption, price, qty }
+    stage: 'idle', // idle | picking_variant | picking_size | picking_qty | confirming | collecting_info
+    currentItem: null, // { sku, name, category, options[], sizes[], chosenOption, size, price }
+    cart: [],          // [{ sku, name, category, chosenOption, size, price, qty }]
     address: '',
     phone: '',
     customer: '',
@@ -316,7 +316,17 @@ async function saveSessionRow(s, note='') {
     });
   } catch (e) { /* ignore */ }
 }
-
+// ----------------------- SESSION HELPERS ------------------
+function nextMissingInfo(s) {
+  if (s.currentItem) {
+    if (!s.currentItem.chosenOption && s.currentItem.options?.length) return 'variant';
+    if (!s.currentItem.size && s.currentItem.sizes?.length) return 'size';
+    if (!s.currentItem.qty) return 'qty';
+  }
+  if (!s.address) return 'address';
+  if (!s.phone) return 'phone';
+  return null;
+}
 // ----------------------- PRODUCT HELPERS ------------------
 function searchProductsByText(text) {
   const tokens = splitList(text.toLowerCase()).concat([text.toLowerCase()]);
@@ -341,7 +351,9 @@ function productFromSKU(sku) {
 function extractOptions(p) {
   return splitList(p['ตัวเลือก'] || '');
 }
-
+function extractSizes(p) {
+  return splitList(p['ขนาด'] || '');
+}
 // ----------------------- AI STYLE (OpenAI) ----------------
 function buildSystemPrompt() {
   const ps = cache.persona || {};
@@ -480,7 +492,26 @@ if (s.stage === 'picking_variant' && s.currentItem) {
     msgText(`ตัวเลือกของ “${s.currentItem.name}”:\n${s.currentItem.options.map(o=>`- ${o}`).join('\n')}\n\nเลือกได้เลยค่ะ ✨`)
   ]);
 }
-
+// 1.5) ถ้ากำลังรอ "ขนาด/size"
+if (s.stage === 'picking_size' && s.currentItem) {
+  const choice = splitList(text)[0]?.trim();
+  if (s.currentItem.sizes?.length && choice) {
+    const matched = s.currentItem.sizes.find(sz => sz.toLowerCase().includes(choice.toLowerCase()));
+    if (matched) {
+      s.currentItem.size = matched;
+      s.stage = 'picking_qty';
+      await saveSessionRow(s, 'picked_size');
+      await lineClient.replyMessage(replyToken, [
+        msgText(`เลือก “${matched}” แล้วค่ะ ต้องการกี่ชิ้นคะ?`)
+      ]);
+      return;
+    }
+  }
+  await lineClient.replyMessage(replyToken, [
+    msgText(`กรุณาเลือกขนาดที่มี: ${s.currentItem.sizes.join(', ')}`)
+  ]);
+  return;
+}
 // 2) ถ้ากำลังรอ "จำนวน"
 if (s.stage === 'picking_qty' && s.currentItem) {
   const m = text.match(/\d+/);
@@ -533,13 +564,16 @@ if (s.stage === 'picking_qty' && s.currentItem) {
       const p = found[0];
       const options = extractOptions(p);
       s.currentItem = {
-        sku: p['รหัสสินค้า'],
-        name: p['ชื่อสินค้า'],
-        category: p['หมวดหมู่'] || '',
-        price: Number(p['ราคา'] || 0),
-        options
-      };
-      s.stage = options.length ? 'picking_variant' : 'picking_qty';
+  sku: p['รหัสสินค้า'],
+  name: p['ชื่อสินค้า'],
+  category: p['หมวดหมู่'] || '',
+  price: Number(p['ราคา'] || 0),
+  options,
+  sizes: splitList(p['ขนาด'] || '') // 🆕 เพิ่ม
+};
+s.stage = options.length ? 'picking_variant'
+         : s.currentItem.sizes?.length ? 'picking_size'
+         : 'picking_qty';
       await saveSessionRow(s, 'product_detected');
 
       if (options.length) {
@@ -608,18 +642,33 @@ if (s.stage === 'picking_qty' && s.currentItem) {
     }
   }
 
-  // 5) Fallback → ให้ AI ตอบเชิงสนทนาตามบุคลิก + ดึงข้อมูลจากชีท (สั้นๆ)
-  const extra = `
-[สินค้าบางส่วน]
-${cache.products.slice(0,10).map(p=>`• ${p['ชื่อสินค้า']} ราคา ${THB(p['ราคา'])}${p['ตัวเลือก']?` (ตัวเลือก: ${extractOptions(p).join(', ')})`:''}`).join('\n')}
-
-[ตัวอย่าง FAQ]
-${cache.faq.slice(0,5).map(f=>`• ${f['คำถาม']}: ${f['คำตอบ']}`).join('\n')}
-  `.trim();
-
-  const ai = await aiReply(text, extra);
-  await lineClient.replyMessage(replyToken, [msgText(ai || 'รับทราบค่ะ 😊')]);
+ // 5) Fallback → ตรวจข้อมูลที่ยังขาดก่อน
+const missing = nextMissingInfo(s);
+if (missing === 'variant') {
+  await lineClient.replyMessage(replyToken, [msgText(`เมื่อกี้ยังไม่ได้เลือกตัวเลือกของ “${s.currentItem.name}” เลยค่ะ 😅\nตัวเลือก: ${s.currentItem.options.join(', ')}`)]);
+  return;
 }
+if (missing === 'size') {
+  await lineClient.replyMessage(replyToken, [msgText(`ยังไม่ได้เลือกขนาดของ “${s.currentItem.name}” ค่ะ มี: ${s.currentItem.sizes.join(', ')}`)]);
+  return;
+}
+if (missing === 'qty') {
+  await lineClient.replyMessage(replyToken, [msgText(`ยังไม่ได้บอกจำนวนเลยค่ะ ต้องการกี่ชิ้นดีคะ?`)]); 
+  return;
+}
+if (missing === 'address') {
+  await lineClient.replyMessage(replyToken, [msgText(`แอดมินขอ “ชื่อ-ที่อยู่” เพื่อจัดส่งด้วยนะคะ 🏠`)]); 
+  return;
+}
+if (missing === 'phone') {
+  await lineClient.replyMessage(replyToken, [msgText(`รบกวนบอกเบอร์โทรติดต่อด้วยค่ะ ☎️`)]); 
+  return;
+}
+
+// ถ้าไม่มีอะไรขาด → ให้ AI ช่วยตอบ
+const extra = `...`;
+const ai = await aiReply(text, extra);
+await lineClient.replyMessage(replyToken, [msgText(ai || 'รับทราบค่ะ 😊')]);
 
 // ----------------------- WEB SERVER -----------------------
 const app = express();
