@@ -462,51 +462,51 @@ async function handleText(userId, replyToken, text) {
 
   // -------- Detect product intent -----------------
   // 1) ถ้ากำลังรอ "ตัวเลือก/รสชาติ"
-  if (s.stage === 'picking_variant' && s.currentItem) {
-    const choice = splitList(text)[0]?.trim();
-    if (s.currentItem.options?.length && choice) {
-      // รับได้ก็ต่อเมื่อ match บางส่วน
-      const matched = s.currentItem.options.find(op => op.toLowerCase().includes(choice.toLowerCase()));
-      if (matched || s.currentItem.options.length === 0) {
-        s.currentItem.chosenOption = matched || choice;
-        s.stage = 'picking_qty';
-        await saveSessionRow(s, 'picked_option');
-        await lineClient.replyMessage(replyToken, [msgText(`ต้องการ “${s.currentItem.name}${s.currentItem.chosenOption?` (${s.currentItem.chosenOption})`:''}” จำนวนกี่ชิ้นคะ? (เช่น 2, 5)`)]); 
-        return;
-      }
-    }
-    // ไม่ตรง -> ให้แสดงตัวเลือก
-    await lineClient.replyMessage(replyToken, [msgText(`ขอเลือกเป็นตัวไหนคะ\nตัวเลือกที่มี: ${s.currentItem.options.join(', ')}`)]);
-    return;
-  }
-
-  // 2) ถ้ากำลังรอ "จำนวน"
-  if (s.stage === 'picking_qty' && s.currentItem) {
-    const m = text.match(/\d+/);
-    if (m) {
-      const qty = Math.max(1, Number(m[0]));
-      s.cart.push({
-        sku: s.currentItem.sku,
-        name: s.currentItem.name,
-        category: s.currentItem.category,
-        chosenOption: s.currentItem.chosenOption || '',
-        price: Number(s.currentItem.price || 0),
-        qty
-      });
-      const cartTxt = renderCart(s.cart);
-      const sum = calcCartSummary(s.cart);
-      s.stage = 'confirming';
-      s.currentItem = null;
-      await saveSessionRow(s, 'qty_added');
-      await lineClient.replyMessage(replyToken, [
-        msgText(`รับทราบแล้วค่ะ 🧾\nตะกร้าปัจจุบัน:\n${cartTxt}\n\nยอดสุทธิ: ${THB(sum.total)}${sum.promo.code?`\nโปรฯ: ${sum.promo.detail}`:''}\nต้องการเพิ่มสินค้าอีกไหมคะ หรือ “สรุปออเดอร์” ได้เลยค่ะ ✨`)
+if (s.stage === 'picking_variant' && s.currentItem) {
+  const choice = splitList(text)[0]?.trim();
+  if (s.currentItem.options?.length && choice) {
+    const matched = s.currentItem.options.find(op => op.toLowerCase().includes(choice.toLowerCase()));
+    if (matched) {
+      s.currentItem.chosenOption = matched;
+      s.stage = 'picking_qty';
+      await saveSessionRow(s, 'picked_option');
+      return await lineClient.replyMessage(replyToken, [
+        msgText(`ต้องการ “${s.currentItem.name} (${s.currentItem.chosenOption})” จำนวนกี่ชิ้นคะ?`)
       ]);
-      return;
-    } else {
-      await lineClient.replyMessage(replyToken, [msgText(`พิมพ์เป็นตัวเลขจำนวนชิ้นนะคะ เช่น 2 หรือ 5`)]); 
-      return;
     }
   }
+  // ตอบเป็น list สั้นๆ ชัดเจน
+  return await lineClient.replyMessage(replyToken, [
+    msgText(`ตัวเลือกของ “${s.currentItem.name}”:\n${s.currentItem.options.map(o=>`- ${o}`).join('\n')}\n\nเลือกได้เลยค่ะ ✨`)
+  ]);
+}
+
+// 2) ถ้ากำลังรอ "จำนวน"
+if (s.stage === 'picking_qty' && s.currentItem) {
+  const m = text.match(/\d+/);
+  if (m) {
+    const qty = Math.max(1, Number(m[0]));
+    s.cart.push({
+      sku: s.currentItem.sku,
+      name: s.currentItem.name,
+      category: s.currentItem.category,
+      chosenOption: s.currentItem.chosenOption || '',
+      price: Number(s.currentItem.price || 0),
+      qty
+    });
+    s.stage = 'confirming';
+    s.currentItem = null;
+    await saveSessionRow(s, 'qty_added');
+    const cartTxt = renderCart(s.cart);
+    const sum = calcCartSummary(s.cart);
+    return await lineClient.replyMessage(replyToken, [
+      msgText(`ตะกร้าปัจจุบัน:\n${cartTxt}\nยอดสุทธิ: ${THB(sum.total)}\n\nพิมพ์ “สรุปออเดอร์” ได้เลยค่ะ หรือเพิ่มสินค้าอื่น`)
+    ]);
+  }
+  return await lineClient.replyMessage(replyToken, [
+    msgText(`พิมพ์เป็นตัวเลขจำนวนชิ้น เช่น 2 หรือ 5`)
+  ]);
+}
 
   // 3) สถานะยืนยัน/เพิ่มสินค้า/ปิดการขาย
   if (s.stage === 'confirming' || s.stage === 'idle') {
