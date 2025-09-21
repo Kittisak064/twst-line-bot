@@ -1,11 +1,20 @@
 {
+  "name": "line-commerce-bot",
+  "version": "1.0.0",
+  "description": "LINE x Google Sheets x OpenAI Thai Commerce Agent",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "@line/bot-sdk": "^7.5.2",
-    "dayjs": "^1.11.11",
+    "@line/bot-sdk": "^7.5.3",
+    "dayjs": "^1.11.13",
     "express": "^4.19.2",
     "google-spreadsheet": "3.3.0",
-    "openai": "^4.59.1"
-  },
-  "scripts": { "start": "node server.js" }
+    "openai": "^4.56.0",
+    "p-limit": "^5.0.0"
+  }
 }
