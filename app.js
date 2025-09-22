@@ -1,5 +1,6 @@
 // =============================================================
-// LINE Commerce Hybrid Bot (Google Sheets + GPT-4o-mini)
+// LINE Commerce Hybrid RAG Bot (Google Sheets + GPT-4o-mini)
+// Author: Dev Assistant
 // =============================================================
 
 import express from "express";
@@ -20,6 +21,11 @@ const {
   ADMIN_GROUP_ID,
   PORT
 } = process.env;
+
+if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY || !GOOGLE_SHEET_ID ||
+    !LINE_CHANNEL_ACCESS_TOKEN || !LINE_CHANNEL_SECRET || !OPENAI_API_KEY) {
+  console.error("[BOOT] Missing environment variables");
+}
 
 const GOOGLE_PRIVATE_KEY_FIX = GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
@@ -48,9 +54,10 @@ const cache = {
 // ------------------ Utils ------------------
 const log = (...a) => console.log("[BOT]", ...a);
 const nowISO = () => new Date().toISOString();
+const shortId = () => Math.random().toString(36).slice(2,10);
 const priceTHB = (n) => `${Number(n||0).toLocaleString("th-TH")} บาท`;
 
-const staffPrefix = () => cache.personality?.gender === "หญิง" ? "ค่ะ" : "ครับ";
+const staffPrefix = () => cache.personality?.gender==="หญิง" ? "ค่ะ" : "ครับ";
 const staffName = () => cache.personality?.staffName || "ทีมงาน";
 const pageName = () => cache.personality?.pageName || "เพจของเรา";
 const dontKnow = () => cache.personality?.dontKnow || "ขอเช็กข้อมูลให้ก่อนนะ";
@@ -65,13 +72,14 @@ async function loadSheet(range) {
 
 function splitList(s) {
   if (!s) return [];
-  return String(s).split(",").map(t => t.trim()).filter(Boolean);
+  return String(s).split(",").map(t=>t.trim()).filter(Boolean);
 }
 
 async function ensureDataLoaded(force=false) {
   if (!force && Date.now()-cache.lastLoadedAt < 5*60*1000) return;
   log("Reloading sheets data…");
-  const [prod, promos, faq, persona, pay] = await Promise.all([
+
+  const [prod,promos,faq,persona,pay] = await Promise.all([
     loadSheet("Products!A2:G"),
     loadSheet("Promotions!A2:F"),
     loadSheet("FAQ!A2:C"),
@@ -86,15 +94,14 @@ async function ensureDataLoaded(force=false) {
   }));
 
   cache.promotions = promos.filter(r=>r[0]||r[1]).map(r=>({
-    code:r[0]||"", detail:r[1]||"",
-    type:(r[2]||"").toLowerCase(),
+    code:r[0]||"", detail:r[1]||"", type:(r[2]||"").toLowerCase(),
     condition:r[3]||"", products:splitList(r[4]), categories:splitList(r[5])
   }));
 
   cache.faq = faq.filter(r=>r[1]||r[2]).map(r=>({ q:r[0]||"", keyword:r[1]||"", a:r[2]||"" }));
 
   if (persona && persona.length) {
-    const p=persona[0];
+    const p = persona[0];
     cache.personality = {
       staffName:p[0]||"ทีมงาน", pageName:p[1]||"เพจของเรา",
       persona:p[2]||"พนักงานขาย สุภาพ กระชับ เป็นกันเอง",
@@ -112,7 +119,7 @@ async function ensureDataLoaded(force=false) {
 }
 
 // ------------------ LINE API ------------------
-async function lineReply(replyToken, messages) {
+async function lineReply(replyToken,messages){
   const url="https://api.line.me/v2/bot/message/reply";
   await fetch(url,{
     method:"POST",
@@ -121,7 +128,16 @@ async function lineReply(replyToken, messages) {
   });
 }
 
-const makeReply = (text,quick=[])=>{
+async function linePush(to,messages){
+  const url="https://api.line.me/v2/bot/message/push";
+  await fetch(url,{
+    method:"POST",
+    headers:{"Content-Type":"application/json","Authorization":`Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`},
+    body:JSON.stringify({to,messages})
+  });
+}
+
+const makeReply=(text,quick=[])=>{
   const msg={type:"text",text:String(text||"")};
   if(quick.length){
     msg.quickReply={items:quick.map(label=>({
@@ -136,8 +152,14 @@ function verifySignature(signature, bodyBuffer){
   return signature===h;
 }
 
-// ------------------ Retrieval ------------------
+// ------------------ NLP + Retrieval ------------------
 const normalize=s=>String(s||"").trim().toLowerCase();
+
+function parseQuantity(text){
+  const t=normalize(text);
+  const m=t.match(/(\d+)/);
+  return m?Math.max(1,parseInt(m[1])):1;
+}
 
 function retrieveFAQ(text){
   const low=normalize(text);
@@ -148,23 +170,92 @@ function retrieveProductsByCategory(cat){
   return cache.products.filter(p=>normalize(p.category)===normalize(cat));
 }
 
-// ------------------ AI Rewriter ------------------
-async function rewriteWithAI(structuredMsg, ragContext=""){
+function retrieveProductCandidates(text){
+  const low=normalize(text);
+  return cache.products.filter(p=>
+    normalize(p.name).includes(low) ||
+    p.aliases.some(a=>normalize(a).includes(low))
+  );
+}
+
+// ------------------ Session + Cart ------------------
+const sessions={};
+function getSession(uid){
+  if(!sessions[uid]) sessions[uid]={userId:uid,stage:"",cart:[],note:""};
+  return sessions[uid];
+}
+function addToCart(session,product,qty=1,option="",size=""){
+  if(!product) return;
+  const found=session.cart.find(c=>c.code===product.code&&c.option===option&&c.size===size);
+  if(found) found.qty+=qty;
+  else session.cart.push({
+    code:product.code,name:product.name,option,size,qty,
+    price:Number(product.price||0),category:product.category
+  });
+}
+function cartTotal(session){ return session.cart.reduce((s,c)=>s+c.price*c.qty,0); }
+function cartSummary(session){
+  if(!session.cart.length) return `ตะกร้าว่างอยู่${staffPrefix()} 🛒`;
+  const lines=session.cart.map(c=>`• ${c.name}${c.size?` ${c.size}`:""} x${c.qty} = ${priceTHB(c.price*c.qty)}`);
+  return `สรุปตะกร้า:\n${lines.join("\n")}\nรวม ${priceTHB(cartTotal(session))}`;
+}
+
+// ------------------ Promotions ------------------
+function applyPromotions(session){
+  const promos=[];
+  for(const promo of cache.promotions){
+    if(promo.categories.some(cat=>session.cart.some(c=>c.category===cat))){
+      promos.push(promo.detail);
+    }
+  }
+  return promos;
+}
+const promotionSummary=session=>{
+  const p=applyPromotions(session);
+  return p.length?`โปรโมชั่น:\n${p.map(x=>"• "+x).join("\n")}`:"";
+};
+
+// ------------------ Orders ------------------
+async function saveOrder(session,nameAddr="",phone=""){
+  const orderId="ORD-"+shortId();
+  const rows=session.cart.map(c=>[
+    orderId,c.code,c.name,c.option,c.qty,c.price*c.qty,
+    promotionSummary(session),nameAddr,phone,"ใหม่"
+  ]);
+  if(!rows.length) return orderId;
+
+  await sheets.spreadsheets.values.append({
+    auth,spreadsheetId:GOOGLE_SHEET_ID,range:"Orders!A:J",
+    valueInputOption:"RAW",requestBody:{values:rows}
+  });
+  return orderId;
+}
+
+async function notifyAdmin(orderId,session){
+  if(!ADMIN_GROUP_ID) return;
+  const lines=session.cart.map(c=>`${c.name} x${c.qty} = ${priceTHB(c.price*c.qty)}`);
+  const total=priceTHB(cartTotal(session));
+  await linePush(ADMIN_GROUP_ID,[
+    {type:"text",text:`🛒 ออเดอร์ใหม่ ${orderId}`},
+    {type:"text",text:`${lines.join("\n")}\nรวม ${total}`}
+  ]);
+}
+
+// ------------------ AI ------------------
+async function rewriteWithAI(structuredMsg,ragContext=""){
   try{
     const resp=await openai.chat.completions.create({
-      model:"gpt-4o-mini",
-      temperature:0.4, max_tokens:180,
+      model:"gpt-4o-mini",temperature:0.4,max_tokens:200,
       messages:[
         {role:"system",content:`คุณคือพนักงานขายชื่อ "${staffName()}" จาก "${pageName()}"
 บุคลิก: ${cache.personality?.persona}
-ห้ามแต่งหรือเพิ่มข้อมูลใหม่ ให้ใช้เฉพาะ context ที่ให้มา
-ตอบสั้น กระชับ เป็นธรรมชาติ`},
+ห้ามแต่งหรือเพิ่มข้อมูลเอง ตอบสั้น กระชับ ชวนคุยต่อเล็กน้อย`},
         {role:"user",content:`Context:\n${ragContext}\n\nMessage:\n${structuredMsg}`}
       ]
     });
     return resp.choices[0].message.content.trim();
   }catch(e){
-    log("rewrite error",e.message);
+    log("AI error",e.message);
     return structuredMsg;
   }
 }
@@ -182,47 +273,42 @@ function detectIntent(text){
   return {type:"unknown"};
 }
 
-// ------------------ Handle ------------------
-async function handleMessage(userId, replyToken, text){
+// ------------------ Handle Message ------------------
+async function handleMessage(userId,replyToken,text){
   await ensureDataLoaded();
+  const session=getSession(userId);
   const intent=detectIntent(text);
-  let structured="", ragContext="", quick=[], finalText="";
+  let structured="",ragContext="",quick=[],finalText="";
 
   switch(intent.type){
     case "greet":
-      structured=`สวัสดี${staffPrefix()} ยินดีต้อนรับสู่เพจ ${pageName()} สนใจหมวดไหนคะ น้ำพริกหรือรถเข็นไต่บันได`;
+      structured=`สวัสดี${staffPrefix()} ยินดีต้อนรับสู่เพจ ${pageName()} สนใจดูหมวดไหนคะ น้ำพริกหรือรถเข็นไต่บันได`;
       quick=["น้ำพริก","รถเข็น"];
       break;
-    case "ask_name":
-      structured=`ฉันชื่อ ${staffName()} จากเพจ ${pageName()}`;
-      break;
-    case "ask_page":
-      structured=`เพจนี้คือ "${pageName()}"`;
-      break;
-    case "faq":
-      structured=intent.answer; // ตอบตรง ไม่ต้อง GPT
-      break;
+    case "ask_name": structured=`ฉันชื่อ ${staffName()} จากเพจ ${pageName()}`; break;
+    case "ask_page": structured=`เพจนี้คือ ${pageName()}`; break;
+    case "faq": structured=intent.answer; break;
     case "browse":
       const items=retrieveProductsByCategory(intent.category);
       if(items.length){
         ragContext=items.map(p=>`${p.name} = ${priceTHB(p.price)}`).join("\n");
-        structured=`รายการสินค้าในหมวด ${intent.category} ดูใน context`;
-        quick=items.slice(0,3).map(p=>p.name);
-      }else{
-        structured=`ยังไม่มีสินค้าในหมวด ${intent.category}`;
-      }
+        structured=`หมวด ${intent.category} ดูรายการใน context`;
+        quick=items.slice(0,3).map(p=>p.name).concat(["เช็กเอาท์"]);
+      }else structured=`ยังไม่มีสินค้าในหมวด ${intent.category}`;
       break;
     case "checkout":
-      structured=`ตะกร้าหรือออเดอร์ (ถ้ามี) จะสรุปตรงนี้ค่ะ`; // ตอบเร็ว ไม่ต้อง GPT
+      const cart=cartSummary(session);
+      const promos=promotionSummary(session);
+      const pays=cache.payment.map(p=>`${p.category}: ${p.method} (${p.detail})`).join("\n");
+      structured=`${cart}\n${promos}\nวิธีชำระเงิน:\n${pays}`;
       break;
     default:
-      structured=`${dontKnow()} สนใจดูหมวดน้ำพริกหรือรถเข็นไต่บันไดคะ`;
+      structured=`${dontKnow()} สนใจหมวดน้ำพริกหรือรถเข็นไต่บันไดคะ`;
       quick=["น้ำพริก","รถเข็น"];
   }
 
-  // Hybrid mode
-  if(intent.type==="faq"||intent.type==="checkout"||intent.type==="ask_name"||intent.type==="ask_page"){
-    finalText=structured; // ตอบตรง
+  if(["faq","checkout","ask_name","ask_page"].includes(intent.type)){
+    finalText=structured;
   }else{
     finalText=await rewriteWithAI(structured,ragContext);
   }
@@ -238,8 +324,8 @@ app.use(bodyParser.json());
 app.get("/healthz",(req,res)=>res.json({ok:true,ts:Date.now()}));
 
 app.post("/webhook",async(req,res)=>{
-  const signature=req.headers["x-line-signature"];
-  if(!verifySignature(signature,req.body)) return res.status(400).send("Bad signature");
+  const sig=req.headers["x-line-signature"];
+  if(!verifySignature(sig,req.body)) return res.status(400).send("Bad sig");
   const body=JSON.parse(req.body.toString("utf8"));
   res.sendStatus(200);
 
@@ -247,7 +333,7 @@ app.post("/webhook",async(req,res)=>{
     if(ev.type==="message" && ev.message?.type==="text"){
       await handleMessage(ev.source.userId,ev.replyToken,ev.message.text);
     }else{
-      await lineReply(ev.replyToken,[makeReply(`ขออภัย รองรับเฉพาะข้อความตัวอักษร${staffPrefix()}`,["น้ำพริก","รถเข็น"])]);
+      await lineReply(ev.replyToken,[makeReply(`รองรับเฉพาะข้อความตัวอักษร${staffPrefix()}`,["น้ำพริก","รถเข็น"])]);
     }
   }
 });
@@ -256,5 +342,5 @@ const port=PORT||3000;
 app.listen(port,async()=>{
   log(`🚀 Server running on port ${port}`);
   await ensureDataLoaded(true);
-  setInterval(()=>ensureDataLoaded(true),5*60*1000); // รีโหลดทุก 5 นาที
+  setInterval(()=>ensureDataLoaded(true),5*60*1000);
 });
