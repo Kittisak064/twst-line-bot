@@ -1,7 +1,6 @@
 {
-  "name": "line-commerce-rag-bot",
+  "name": "line-commerce-hybrid-bot",
   "version": "1.0.0",
-  "description": "LINE Commerce RAG Bot (Google Sheets + OpenAI) — Thai",
   "main": "app.js",
   "type": "module",
   "scripts": {
