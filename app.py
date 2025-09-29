@@ -111,8 +111,7 @@ def process_user_message(user_text: str) -> str:
     except Exception as e:
         return f"ขออภัยค่ะ เกิดข้อผิดพลาดในการตอบ ({e})"
 
-# -------------------------------
-# 7. Run local (เวลาเทสในเครื่อง)
-# -------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    import os
+    port = int(os.environ.get("PORT", 10000))  # Render จะส่ง PORT มา
+    app.run(host="0.0.0.0", port=port)
