@@ -115,4 +115,4 @@ def process_user_message(user_text: str) -> str:
 # 7. Run local (เวลาเทสในเครื่อง)
 # -------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
