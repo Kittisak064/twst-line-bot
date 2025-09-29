@@ -1,62 +1,80 @@
 import os
-import json
-import openai
 import gspread
 from flask import Flask, request, abort
-from google.oauth2.service_account import Credentials
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from google.oauth2.service_account import Credentials
+from openai import OpenAI
 
 # -------------------------------
-# 1. ตั้งค่า ENV จาก Render
-# -------------------------------
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GOOGLE_CREDENTIALS_FILE = "/etc/secrets/google-service-account.json"  # Secret File บน Render
-
-if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY, SPREADSHEET_ID]):
-    raise ValueError("❌ Environment Variables ยังไม่ครบ ตรวจสอบใน Render อีกครั้ง")
-
-# -------------------------------
-# 2. Init API Clients
-# -------------------------------
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-openai.api_key = OPENAI_API_KEY
-
-# -------------------------------
-# 3. เชื่อม Google Sheets
-# -------------------------------
-creds = Credentials.from_service_account_file(
-    GOOGLE_CREDENTIALS_FILE,
-    scopes=["https://www.googleapis.com/auth/spreadsheets"]
-)
-gs_client = gspread.authorize(creds)
-
-# ตัวอย่าง: โหลดชีทข้อมูลสินค้า
-try:
-    ws_products = gs_client.open_by_key(SPREADSHEET_ID).worksheet("ข้อมูลสินค้าและราคา")
-    product_data = ws_products.get_all_records()
-except Exception as e:
-    product_data = []
-    print("⚠️ โหลดข้อมูลสินค้าไม่สำเร็จ:", e)
-
-# -------------------------------
-# 4. Flask App
+# ตั้งค่า Flask
 # -------------------------------
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "LINE Bot ทำงานแล้ว 🚀"
+# -------------------------------
+# ตั้งค่า LINE
+# -------------------------------
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
-@app.route("/callback", methods=['POST'])
-def callback():
-    # รับ signature จาก LINE
-    signature = request.headers['X-Line-Signature']
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# -------------------------------
+# ตั้งค่า OpenAI
+# -------------------------------
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# -------------------------------
+# ตั้งค่า Google Sheets
+# -------------------------------
+# ใช้ Secret File (google-service-account.json) ที่อัปโหลดเข้า Render
+SERVICE_ACCOUNT_FILE = "google-service-account.json"
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+
+gc = gspread.authorize(creds)
+
+# ใส่ Spreadsheet ID ของคุณ
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+
+def read_sheet(sheet_name):
+    """อ่านข้อมูลจาก Google Sheets"""
+    try:
+        sh = gc.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.worksheet(sheet_name)
+        records = worksheet.get_all_records()
+        return records
+    except Exception as e:
+        print(f"⚠️ โหลดข้อมูลไม่สำเร็จจาก {sheet_name}: {e}")
+        return []
+
+# -------------------------------
+# ฟังก์ชันถาม GPT
+# -------------------------------
+def ask_gpt(user_message):
+    """ส่งข้อความไปหา GPT"""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "คุณคือน้องฟักแฟง แอดมินร้านน้ำพริกและรถเข็นไฟฟ้า บุคลิกน่ารัก สดใส เป็นกันเอง"},
+                {"role": "user", "content": user_message}
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print("❌ OpenAI Error:", e)
+        return "ขออภัยค่ะ เกิดข้อผิดพลาดในการตอบ 😅"
+
+# -------------------------------
+# LINE Webhook
+# -------------------------------
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
 
     try:
@@ -64,54 +82,25 @@ def callback():
     except InvalidSignatureError:
         abort(400)
 
-    return 'OK'
+    return "OK"
 
 # -------------------------------
-# 5. Event Handler
+# จัดการข้อความจากลูกค้า
 # -------------------------------
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    user_text = event.message.text.strip()
-    reply_text = process_user_message(user_text)
+    user_message = event.message.text
+    print(f"📩 ข้อความจากลูกค้า: {user_message}")
+
+    reply_text = ask_gpt(user_message)
+
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text=reply_text)
     )
 
 # -------------------------------
-# 6. Logic การตอบลูกค้า
+# Run local (Render จะใช้ gunicorn)
 # -------------------------------
-def process_user_message(user_text: str) -> str:
-    """
-    - ถ้าเจอชื่อสินค้าที่ตรงกับ Google Sheets → ตอบข้อมูลสินค้า
-    - ถ้าไม่เจอ → ส่งข้อความไปที่ OpenAI เพื่อให้ตอบแทน
-    """
-    # 6.1 เช็คข้อมูลในชีทสินค้า
-    for product in product_data:
-        if product["ชื่อสินค้าในระบบขาย"] in user_text or product["ชื่อสินค้าที่มักถูกเรียก"] in user_text:
-            return (
-                f"สินค้า: {product['ชื่อสินค้าในระบบขาย']}\n"
-                f"ขนาด: {product['ขนาด']} {product['หน่วย']}\n"
-                f"ราคา: {product['ราคาขาย']} บาท\n"
-                f"ค่าส่ง: {product['ราคาค่าขนส่ง']} บาท"
-            )
-
-    # 6.2 ถ้าไม่เจอสินค้า → ใช้ GPT ตอบ
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "คุณคือน้องฟักแฟง แอดมินเพจน่ารัก สดใส สุภาพ ช่วยตอบลูกค้าเรื่องสินค้า"},
-                {"role": "user", "content": user_text}
-            ],
-            temperature=0.7,
-            max_tokens=300
-        )
-        return response["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"ขออภัยค่ะ เกิดข้อผิดพลาดในการตอบ ({e})"
-
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 10000))  # Render จะส่ง PORT มา
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
