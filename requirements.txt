@@ -1,0 +1,7 @@
+Flask==3.0.3
+gunicorn==21.2.0
+line-bot-sdk==2.4.2
+openai==1.43.0
+gspread==6.1.2
+google-auth==2.35.0
+python-dotenv==1.0.1
