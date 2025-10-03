@@ -32,18 +32,22 @@ logger = logging.getLogger("app")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 
+print("DEBUG LINE_CHANNEL_SECRET exists:", bool(LINE_CHANNEL_SECRET))
+print("DEBUG LINE_CHANNEL_ACCESS_TOKEN exists:", bool(LINE_CHANNEL_ACCESS_TOKEN))
+
 if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
     logger.warning("LINE credentials are not set. Please configure LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN.")
-
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Google Sheets
 SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID", "")
 SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
+print("DEBUG GOOGLE_SPREADSHEET_ID exists:", bool(SPREADSHEET_ID))
+print("DEBUG GOOGLE_SERVICE_ACCOUNT_JSON exists:", bool(SERVICE_ACCOUNT_JSON))
+
 if not SPREADSHEET_ID or not SERVICE_ACCOUNT_JSON:
     logger.warning("Google Sheets env vars not set. Please set GOOGLE_SPREADSHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON.")
+
 
 try:
     sa_dict = json.loads(SERVICE_ACCOUNT_JSON) if SERVICE_ACCOUNT_JSON else {}
